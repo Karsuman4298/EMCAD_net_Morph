@@ -1,0 +1,309 @@
+\documentclass[journal]{IEEEtran}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{url}
+\usepackage{cite}
+
+\interdisplaylinepenalty=2500
+\hyphenation{op-tical net-works semi-conduc-tor}
+
+\newcommand{\method}{HUPAnno-EMCAD}
+\newcommand{\bpanno}{BPAnno-EMCAD}
+\newcommand{\fs}{FS-EMCAD}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+
+\begin{document}
+
+\title{HUPAnno-EMCAD: Curvature-Guided Local Refinement and Phase-Scheduled Weak Supervision for Medical Image Segmentation}
+
+\author{Author~Name,~\IEEEmembership{Member,~IEEE,}
+        Coauthor~Name,~and~Advisor~Name
+\thanks{The authors are with the Department of [Department], [Institution], [City], [Country]. Corresponding author: [email].}}
+
+\markboth{IEEE Transactions on [Journal Name]}{Author \MakeLowercase{\textit{et al.}}: HUPAnno-EMCAD}
+
+\maketitle
+
+\begin{abstract}
+Weakly supervised segmentation seeks to reduce annotation cost by replacing dense pixel labels with spatially coarse or partially resolved annotations. This paper presents HUPAnno-EMCAD, a weakly supervised segmentation system that combines global polygon-derived certainty regions with automatically selected local refinement patches (LRPs), a multi-scale deformable feature-warping module, auxiliary region classification and confidence heads, and phase-scheduled embedding and prototype losses. The method is implemented on an EMCAD encoder-decoder with a PVTv2-B2 backbone. HUPAnno constructs a certain foreground region, a certain background region, a global uncertain ring, and locally refined foreground, background, and unresolved regions. The decoder's MorphWrapper predicts multiple pixel-space sampling fields and aggregates warped skip features before large-kernel gated attention. Training begins with certain-region supervision and progressively activates ring classification, entropy-ranked contrastive anchors, LRP anchors, confidence calibration, and distance-aware prototype regularization. We formulate the method directly from the released implementation and distinguish it from two comparison systems: BPAnno-EMCAD, which uses global polygon rings with three-class classification and pseudo-label contrastive learning, and fully supervised EMCAD, which uses dense masks. No numerical result is claimed here without a recorded experiment; the manuscript provides a reproducible evaluation protocol and tables to be populated from measured runs.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Weakly supervised segmentation, medical image segmentation, polygon annotation, local refinement, deformable feature warping, pixel contrastive learning, EMCAD.
+\end{IEEEkeywords}
+
+\section{Introduction}
+\IEEEPARstart{M}{edical} image segmentation is commonly formulated with dense binary masks, but producing such masks is costly and requires substantial domain expertise. Polygonal annotation can reduce the number of user interactions, yet it introduces uncertainty near object boundaries. A method trained only on the interior of a tight polygon and the exterior of a loose polygon must infer the unresolved boundary without treating the uncertain ring as a fully observed label.
+
+This work studies a weak-supervision pipeline implemented in the accompanying EMCAD repository. The proposed method, HUPAnno-EMCAD, uses two spatial scales of annotation. First, a global inner and outer polygon define confident foreground and background regions and an uncertain ring. Second, the implementation selects up to two high-curvature boundary segments and constructs local refinement patches around them. The resulting labels distinguish certain background, global uncertainty, LRP uncertainty, and certain foreground. The current code generates these labels from binary masks in the dataloader to simulate the annotation protocol; consequently, all quantitative claims must identify this simulation condition unless independent human annotations are supplied.
+
+The segmentation network extends EMCAD with MorphWrapper. MorphWrapper estimates several offset fields and attention maps from decoder guidance and encoder skip features. It then warps the skip feature with bilinear sampling and fuses the result with the original EMCAD large-kernel gated attention path. Its final estimator convolution is zero initialized, making the wrapper an identity mapping at initialization under the implemented sampling convention.
+
+The contributions of this paper are as follows:
+\begin{itemize}
+    \item We specify HUPAnno as an implementation-grounded weak annotation construction with global certainty regions and curvature-guided local refinement regions.
+    \item We describe the MorphWrapper-enhanced EMCAD architecture and its auxiliary four-class classification, confidence, and 128-dimensional embedding heads.
+    \item We formulate the phase-scheduled objective used by the training program, including masked certain-region loss, ring classification, contrastive learning, confidence calibration, and prototype-based patch regularization.
+    \item We define BPAnno-EMCAD and fully supervised EMCAD comparison protocols and state the evaluation conditions needed for a fair comparison.
+\end{itemize}
+
+\section{Related Work}
+\subsection{Efficient Encoder--Decoder Segmentation}
+EMCAD is an efficient multi-scale convolutional attention decoder that combines multi-scale depth-wise convolution, efficient up-convolution, channel and spatial attention, and large-kernel gated attention. The present work retains these decoder components and adds MorphWrapper only in the HUPAnno network variant. PVTv2-B2 is used as the default encoder, while the implementation also provides PVTv2 and ResNet alternatives.
+
+\subsection{Weak Polygon and Boundary Supervision}
+Polygon-based supervision typically provides an inner region that is likely foreground, an outer envelope that contains the object, and an unresolved band between them. BPAnno-EMCAD in this repository implements this global-ring setting. HUPAnno-EMCAD adds automatically selected local regions around high-curvature contour segments. These regions should be interpreted as simulated local refinements when generated from reference masks by the current dataloader.
+
+\subsection{Contrastive Representation Learning}
+The two weakly supervised systems use pixel-level embeddings to propagate information from reliable regions into uncertain regions. BPAnno uses predicted classes, entropy filtering, and a negative queue. HUPAnno uses an image-level foreground prototype, live and queued background negatives, and entropy-ranked or LRP-selected uncertain anchors according to the training phase.
+
+\section{Problem Formulation}
+Let $I\in\R^{H\times W\times c}$ be an image, where grayscale inputs are mapped to three channels by a learned $1\times1$ convolution, batch normalization, and ReLU. Let $M\in\{0,1\}^{H\times W}$ denote the binary reference mask available to the current benchmark pipeline. During training, $M$ is used by the dataloader to synthesize weak labels; it is not passed to the segmentation loss as a dense target.
+
+For HUPAnno, define the global inner and outer binary maps $y_{\mathrm{in}}$ and $y_{\mathrm{out}}$. The implementation uses $y_{\mathrm{out}}=1$ inside the outer envelope. Therefore,
+\begin{align}
+\Omega_I &= \{(i,j):y_{\mathrm{in}}(i,j)=1\},\\
+\Omega_O &= \{(i,j):y_{\mathrm{out}}(i,j)=0\},\\
+\Omega_\Delta &= \{(i,j):y_{\mathrm{out}}(i,j)-y_{\mathrm{in}}(i,j)=1\}.
+\end{align}
+The inner map is intersected with the outer map before these regions are returned. Local refinement produces $y_{\mathrm{RF}}$, $y_{\mathrm{RB}}$, $y_{\mathrm{LRP}\Delta}$, and $y_{\mathrm{LRP}}$. Their corresponding regions are
+\begin{align}
+\Omega_{RF}&=\{y_{\mathrm{RF}}=1\}, &
+\Omega_{RB}&=\{y_{\mathrm{RB}}=1\},\\
+\Omega_{LRP\Delta}&=\{y_{\mathrm{LRP}\Delta}=1\}, &
+\Omega_{LRP}&=\{y_{\mathrm{LRP}}=1\}.
+\end{align}
+The categorical target $y_c\in\{0,1,2,3\}^{H\times W}$ is assigned as class 0 for background, class 1 for global uncertainty, class 2 for LRP uncertainty, and class 3 for foreground. The implementation assigns LRP background before certain foreground and LRP foreground after it; thus overlapping generated regions are resolved by that assignment order.
+
+\section{HUPAnno Label Construction}
+\subsection{Global Polygon Approximation}
+The largest connected contour of the binary mask is extracted. Its area is $A$ pixels and its equivalent radius is $r=\sqrt{A/\pi}$. For $A<100$, the implementation uses fixed dilation and erosion kernel sizes $(5,3)$ and local absolute widths $(3,2)$. Otherwise, the global kernel sizes are derived from $r$ using factors $0.40$ and $0.22$, with minimum sizes five and three. Each kernel size is made odd. The dilated and eroded masks are converted into polygon masks using Douglas--Peucker approximation with ratio $0.02$ and iterative vertex constraints between five and fifteen. If the inner polygon is empty, the binary mask is used as a fallback.
+
+Let $D$ and $E$ denote the polygon masks obtained from dilation and erosion. The global labels are
+\begin{align}
+ y_{\mathrm{out}}&=D, & y_{\mathrm{in}}&=E\land D,\\
+ \omega_\Delta&=\operatorname{clip}(D-E,0,1).
+\end{align}
+No dense mask is directly optimized by the HUPAnno loss; $M$ is used only to construct these simulated weak labels in the current implementation.
+
+\subsection{Curvature-Guided Local Refinement}
+Let the largest contour contain ordered points $q_0,\ldots,q_{N-1}$. For contour index $i$, define
+\begin{align}
+ v_1 &= q_i-q_{i-2}, & v_2&=q_{i+2}-q_i,\\
+ \kappa_i&=1-\operatorname{clip}\left(\frac{v_1^\mathsf{T}v_2}{(\|v_1\|_2+\epsilon)(\|v_2\|_2+\epsilon)},-1,1\right).
+\end{align}
+The curvature scores are smoothed by a length-five moving average. A greedy nonmaximum suppression procedure selects at most $K=2$ centers; selected neighborhoods suppress nearby contour indices. The method therefore selects geometric high-curvature segments, not human-selected hard examples.
+
+For each selected segment, a rectangular crop is formed with padding twice the local dilation width. Erosion and dilation are applied inside the crop and polygonized. The union of all local inner and outer masks gives $L_I$ and $L_O$. The returned local maps are
+\begin{align}
+ y_{\mathrm{RF}}&=L_I, & y_{\mathrm{RB}}&=B_{\mathrm{LRP}}\odot(1-L_O),\\
+ y_{\mathrm{LRP}\Delta}&=\operatorname{clip}(L_O-L_I,0,1), & y_{\mathrm{LRP}}&=B_{\mathrm{LRP}}.
+\end{align}
+Here $B_{\mathrm{LRP}}$ is the union of local crop supports. For lesions with area below the configured minimum of 20 pixels, the implementation returns empty local maps.
+
+\section{Network Architecture}
+\subsection{Encoder and EMCAD Decoder}
+The default encoder is PVTv2-B2, producing four feature maps $(x_1,x_2,x_3,x_4)$ with channel widths $(64,128,320,512)$ and spatial strides corresponding to progressively coarser stages. A learned adapter converts one-channel inputs to three channels. The decoder starts from $x_4$, applies the EMCAD bottleneck, and successively upsamples and fuses $x_3,x_2,x_1$. Its building blocks are multi-scale depth-wise convolution blocks with kernel set $\{1,3,5\}$, efficient up-convolution blocks, channel attention, spatial attention, and large-kernel gated attention.
+
+For guidance $g$ and skip feature $x$, LGAG computes
+\begin{align}
+ g'&=\operatorname{BN}(\operatorname{Conv}_{k\times k}^{g}(g)),\\
+ x'&=\operatorname{BN}(\operatorname{Conv}_{k\times k}^{x}(x)),\\
+ \psi&=\sigma\left(\operatorname{BN}(\operatorname{Conv}_{1\times1}(\operatorname{ReLU}(g'+x'))\right),\\
+ \operatorname{LGAG}(g,x)&=x\odot\psi.
+\end{align}
+The implementation uses $k=3$ for the default configuration.
+
+\subsection{MorphWrapper}
+At each of the three skip-fusion stages, MorphWrapper receives the upsampled decoder feature $g$ and encoder skip $x$. The released decoder assumes equal channel widths at these fusion points. Their concatenation is processed by a three-convolution estimator $\Phi$ with LeakyReLU slope $0.1$ and hidden widths $[128,64,32]$ for the default PVTv2-B2 configuration. For $K=4$ sampling heads,
+\begin{equation}
+ O=\Phi([g;x])\in\R^{B\times3K\times H\times W}.
+\end{equation}
+The first $2K$ channels are offset fields and the final $K$ channels are attention logits. The final estimator convolution is initialized to zero. Let $u_{b,k}(i,j)=(\Delta x_{b,k},\Delta y_{b,k})$ be the pixel-space offset. The implementation constructs the absolute grid $p(i,j)=(j,i)$ and normalizes the displaced coordinates for use by `grid_sample`:
+\begin{align}
+ p'_{b,k}(i,j)&=p(i,j)+u_{b,k}(i,j),\\
+ G_{b,k}(i,j)&=\left(\frac{p'_x}{(W-1)/2}-1,\frac{p'_y}{(H-1)/2}-1\right).
+\end{align}
+The warped feature is
+\begin{equation}
+ x_{b,k}^{w}=\operatorname{GridSample}(x_b,G_{b,k}),
+\end{equation}
+with bilinear interpolation, border padding, and `align_corners=False`. Attention weights are
+\begin{equation}
+ A_{b,k}(i,j)=\frac{\exp(R_{b,k}(i,j))}{\sum_{k'=1}^{K}\exp(R_{b,k'}(i,j))},
+\end{equation}
+and the aggregated feature is
+\begin{equation}
+ x_b^{w}(i,j)=\sum_{k=1}^{K}A_{b,k}(i,j)x_{b,k}^{w}(i,j).
+\end{equation}
+At initialization, the estimator output is zero, so offsets are zero and attention is uniform. Under the implemented coordinate conversion, each head samples the identity grid and $x^w=x$. The fusion used by the HUPAnno decoder is
+\begin{equation}
+ d_s\leftarrow d_s+\operatorname{LGAG}(d_s,x_s^w)+x_s^w.
+\end{equation}
+When MorphWrapper is disabled, the code uses the EMCAD fusion without the additional warped-skip term.
+
+\subsection{Prediction and Auxiliary Heads}
+Each decoder output is projected to one-channel logits and upsampled to the input resolution, yielding $p_4,p_3,p_2,p_1$. The finest output $p_1$ is used during validation and inference. From the finest decoder feature, the network additionally produces four-class logits $z_c$, a sigmoid confidence map $c$, and a 128-dimensional embedding map $e$. The embedding is channel-normalized as
+\begin{equation}
+ \hat e(i,j)=\frac{e(i,j)}{\|e(i,j)\|_2+\epsilon}.
+\end{equation}
+A first-in-first-out queue of 1024 normalized embedding vectors is maintained as a registered model buffer.
+
+\section{HUPAnno Objective}
+All masks are resized using nearest-neighbor interpolation. Let $p$ denote one segmentation logit map and $q=\sigma(p)$. The implementation uses masked binary cross entropy for certain regions. In compact region notation, the intended region-restricted form is
+\begin{align}
+ \mathcal{L}_{in}(p)&=\E_{\Omega_I}[-\log q],\\
+ \mathcal{L}_{out}(p)&=\E_{\Omega_O}[-\log(1-q)],\\
+ \mathcal{L}_{RF}(p)&=\E_{\Omega_{RF}}[-\log q],\\
+ \mathcal{L}_{RB}(p)&=\E_{\Omega_{RB}}[\operatorname{softplus}(p)],\\
+ \mathcal{L}_c(p)&=\mathcal{L}_{in}+\mathcal{L}_{out}+\mathcal{L}_{RF}+\mathcal{L}_{RB}.
+\end{align}
+Terms whose regions are empty are implemented as zero. The code computes $\mathcal{L}_c$ for all four deep-supervision outputs:
+\begin{equation}
+ \mathcal{L}_c^{\mathrm{total}}=\sum_{s\in\{4,3,2,1\}}\mathcal{L}_c(p_s).
+\end{equation}
+
+\subsection{Ring Classification}
+The four-class classification loss is evaluated only on the global uncertain ring mask $\omega_\Delta$:
+\begin{equation}
+ \mathcal{L}_{ce}=\E_{(i,j):\omega_\Delta(i,j)=1}
+ \left[-\log\operatorname{softmax}(z_c(i,j))_{y_c(i,j)}\right].
+\end{equation}
+If no ring pixel is present, the implementation returns a zero tensor with a gradient connection.
+
+\subsection{Confidence Calibration}
+The confidence target is $\tau=0.3$ inside the LRP support and $\tau=0.5$ elsewhere. The confidence loss is
+\begin{equation}
+ \mathcal{L}_{conf}=\frac{1}{HW}\sum_{i,j}(c(i,j)-\tau(i,j))^2.
+\end{equation}
+
+\subsection{HUPAnno Pixel Contrastive Loss}
+For an image $b$, positive features are sampled from $\Omega_I^{(b)}$ and averaged to produce
+\begin{equation}
+ v_b^+=\frac{1}{|P_b|}\sum_{(i,j)\in P_b}\hat e_b(i,j),\qquad |P_b|\le128.
+\end{equation}
+Live negatives are sampled from $\Omega_O^{(b)}$ with at most 128 vectors and concatenated with the transposed queue $Q$. For an anchor $a$, the logits are
+\begin{align}
+ s^+&=a^\mathsf{T}v_b^+/T, &s_n&=a^\mathsf{T}n/T,
+\end{align}
+where $T=0.07$. The loss is
+\begin{equation}
+ \mathcal{L}_{PCL}^{(a)}=-\log\frac{\exp(s^+)}{\exp(s^+)+\sum_{n\in Q\cup N_b}\exp(s_n)}.
+\end{equation}
+In phase 2, anchors are selected from non-LRP uncertain pixels by taking the highest predictive entropy values, using a sampling ratio of $0.5$ and a maximum of 256 anchors. In phase 3, these anchors are combined with uniformly sampled LRP-uncertain anchors using ratio $0.85$ and the same maximum. Live background embeddings are enqueued without gradient.
+
+\subsection{Patch Prototype Regularization}
+For LRP-uncertain pixels, OpenCV Euclidean distance transforms are computed from the LRP foreground and background masks. A pixel is assigned to the closer side. With scalar exponential-moving-average prototypes $\pi_{FG}$ and $\pi_{BG}$, the binary KL divergence used by the implementation is
+\begin{equation}
+ D_{KL}(\pi\|q)=\pi\log\frac{\pi}{q}+(1-\pi)\log\frac{1-\pi}{1-q}.
+\end{equation}
+The patch loss averages this divergence over pixels assigned to each side, omitting empty partitions. Prototypes are initialized to $(0.8,0.2)$ and updated with decay $\gamma=0.99$ from predictions in $\Omega_I$ and $\Omega_O$.
+
+\section{Training Curriculum}
+Let $t=e/E$, where $e$ is the one-indexed epoch and $E$ is the total number of epochs. The phase is
+\begin{equation}
+ \operatorname{phase}(t)=
+ \begin{cases}
+ 1,&t<0.30,\\
+ 2,&0.30\le t<0.70,\\
+ 3,&t\ge0.70.
+ \end{cases}
+\end{equation}
+The complete weighted objective is
+\begin{equation}
+ \mathcal{L}=\mathcal{L}_c^{\mathrm{total}}+0.1\mathcal{L}_{PCL}+0.3\mathcal{L}_{ce}+0.2\mathcal{L}_{patch}+0.05\mathcal{L}_{conf},
+\end{equation}
+with inactive terms set to zero. Thus, phase 1 uses only certain-region supervision; phase 2 adds ring classification, confidence calibration, and easy uncertain anchors; phase 3 additionally activates LRP anchors and patch prototype regularization. Every mini-batch is evaluated at scales $0.75$, $1.0$, and $1.25$ of the base image size, rounded to a multiple of 32. The code performs a separate forward, backward, and optimizer update for each scale.
+
+The optimizer is AdamW with learning rate $10^{-4}$ and weight decay $10^{-4}$. The first three epochs use linear warm-up. Subsequent epochs use cosine annealing with minimum learning rate $10^{-6}$. Gradients are clipped with the repository utility using clip value $0.5$.
+
+\section{Comparison Systems}
+\subsection{BPAnno-EMCAD}
+BPAnno-EMCAD is the weak-supervision comparison implemented in `train_polyp_bp.py`. It constructs an inner polygon by erosion and an outer envelope by dilation, with adaptive scale factors $0.22$ and $0.40$ relative to the equivalent lesion radius. It uses a three-class map: certain background, uncertain ring, and certain foreground. Its base segmentation loss is the sum of inner and outer masked BCE terms plus an optional edge term with coefficient $0.3$. After the warm-up fraction, it adds ring-only three-class cross entropy and a pseudo-label-guided contrastive loss. Pseudo-labels are generated from the CCG prediction, segmentation probability, and an entropy threshold of $0.5$. This baseline does not use HUPAnno's LRP maps, confidence head, patch prototype term, or MorphWrapper-specific HUP heads.
+
+\subsection{Fully Supervised EMCAD}
+The fully supervised reference uses `lib/networks_fs.py`, which contains the standard EMCAD architecture with PVTv2-B2 and four deep-supervision segmentation outputs. It does not contain the HUPAnno CCG, confidence, embedding, or MorphWrapper additions. A fair fully supervised experiment must train this model with the dense binary mask on the same train/validation/test partitions, image size, augmentation policy, optimizer family, and encoder initialization used for the weakly supervised experiments. The repository snapshot should be accompanied by the exact fully supervised training script and command before reporting this baseline as a measured result.
+
+\section{Experimental Protocol}
+\subsection{Datasets and Splits}
+The launcher supports Kvasir, Lung, ISIC 2018, ETIS Polyp, COVID19, ColonDB Polyp, and ClinicDB. Each dataset is expected to contain `train/images`, `train/masks`, `val/images`, `val/masks`, and, when test evaluation is performed, `test/images` and `test/masks`. The current HUP training entry point selects the best checkpoint using validation Dice. It does not evaluate the test split during training.
+
+\subsection{Evaluation Metrics}
+For binary prediction $P$ and reference mask $G$, Dice and IoU are
+\begin{align}
+ \operatorname{Dice}&=\frac{2|P\cap G|+\epsilon}{|P|+|G|+\epsilon},\\
+ \operatorname{IoU}&=\frac{|P\cap G|+\epsilon}{|P\cup G|+\epsilon}.
+\end{align}
+The HUP evaluator thresholds the sigmoid finest prediction at $0.5$. For HD95, let $d(A,B)$ denote the Euclidean distance from each point in set $A$ to the nearest point in set $B$. The implementation computes the 95th percentile of the concatenated directed distances between predicted and reference foreground sets. Samples with empty reference masks are skipped; if the prediction is empty while the reference is nonempty, the implementation uses a distance-transform fallback. Reported mean, median, and standard deviation must state the evaluated split and the number of valid samples.
+
+\subsection{Reproducibility Requirements}
+Each result should record the repository commit, dataset path and split, encoder, pretrained checkpoint, image size, batch size, epoch count, GPU identifier, random seeds, and the generated `best_metrics.json`. Because local refinement is synthesized from reference masks in the current code, the paper should also report the annotation-generation configuration: $K=2$, Douglas--Peucker ratio $0.02$, vertex range $[5,15]$, LRP minimum area 20, and the dynamic kernel rules.
+
+\section{Results}
+No numerical values are inserted in this manuscript without completed runs. Table~\ref{tab:main-results} is the reporting format for validation or test results. Values must be copied from per-image evaluation outputs, not estimated from training logs.
+
+\begin{table*}[t]
+\caption{Segmentation comparison. Report mean $\pm$ standard deviation where appropriate. Use the same split and checkpoint-selection rule for all methods.}
+\label{tab:main-results}
+\centering
+\begin{tabular}{lccccccc}
+\toprule
+Method & Mean Dice $\uparrow$ & Median Dice $\uparrow$ & Std Dice $\downarrow$ & Mean IoU $\uparrow$ & Median IoU $\uparrow$ & Mean HD95 $\downarrow$ & Median HD95 $\downarrow$ \\
+\midrule
+\bpanno & -- & -- & -- & -- & -- & -- & -- \\
+\method & -- & -- & -- & -- & -- & -- & -- \\
+\fs & -- & -- & -- & -- & -- & -- & -- \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\begin{table}[t]
+\caption{Ablation plan for the proposed method.}
+\label{tab:ablation}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+Variant & Morph & LRP & Conf. & Patch \\
+\midrule
+EMCAD weak baseline & no & no & no & no \\
++ MorphWrapper & yes & no & no & no \\
++ LRP objectives & yes & yes & no & no \\
++ Confidence & yes & yes & yes & no \\
+Full \method & yes & yes & yes & yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Limitations and Threats to Validity}
+First, the released training dataloader derives weak annotations from binary masks. This establishes a controlled simulation of weak supervision but does not by itself demonstrate performance with independently acquired human polygon or LRP annotations. Second, the current HUP training script selects checkpoints on validation Dice and reports validation statistics; test-set claims require a separate, fixed evaluation command. Third, the HD95 implementation has explicit behavior for empty masks and therefore is not automatically interchangeable with every external HD95 implementation. Fourth, the current repository does not provide a single verified fully supervised training entry point equivalent to the HUP launcher; the fully supervised baseline must therefore be implemented and documented before comparison numbers are reported. Finally, the geometric LRP detector selects curvature peaks and should not be described as an annotator oracle unless a human annotation study is added.
+
+\section{Conclusion}
+This paper presented HUPAnno-EMCAD, a curvature-guided weak-supervision framework implemented on an EMCAD encoder-decoder. The method combines global polygon-derived certainty regions, local refinement regions, identity-initialized multi-head feature warping, auxiliary classification and confidence predictions, contrastive embedding learning, and prototype-based regularization under a three-phase curriculum. The formulation and protocol were stated to match the released implementation, including its simulated annotation construction and evaluation conventions. Future experiments should populate the comparison and ablation tables using fixed splits, independent test evaluation, and a documented fully supervised training baseline.
+
+\begin{thebibliography}{99}
+\bibitem{pvtv2}
+W. Wang, E. Xie, X. Li, D. Fan, K. Song, D. Liang, T. Lu, P. Luo, and L. Shao, ``PVT v2: Improved baselines with pyramid vision transformer,'' \emph{Comput. Vis. Media}, vol. 8, no. 3, pp. 415--424, 2022.
+
+\bibitem{resnet}
+K. He, X. Zhang, S. Ren, and J. Sun, ``Deep residual learning for image recognition,'' in \emph{Proc. IEEE Conf. Comput. Vis. Pattern Recognit.}, 2016, pp. 770--778.
+
+\bibitem{emcad}
+M. M. Rahman and R. Marculescu, ``EMCAD: Efficient multi-scale convolutional attention decoding for medical image segmentation,'' in \emph{Proc. IEEE/CVF Conf. Comput. Vis. Pattern Recognit. Workshops}, 2024.
+
+\bibitem{contrastive}
+T. Chen, S. Kornblith, M. Norouzi, and G. Hinton, ``A simple framework for contrastive learning of visual representations,'' in \emph{Proc. Int. Conf. Mach. Learn.}, 2020, pp. 1597--1607.
+
+\bibitem{spatialtransformer}
+M. Jaderberg, K. Simonyan, A. Zisserman, and K. Kavukcuoglu, ``Spatial transformer networks,'' in \emph{Adv. Neural Inf. Process. Syst.}, 2015.
+
+\bibitem{u-net}
+O. Ronneberger, P. Fischer, and T. Brox, ``U-Net: Convolutional networks for biomedical image segmentation,'' in \emph{Proc. Int. Conf. Med. Image Comput. Comput.-Assisted Intervention}, 2015, pp. 234--241.
+\end{thebibliography}
+
+\end{document}
