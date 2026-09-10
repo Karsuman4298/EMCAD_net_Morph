@@ -25,6 +25,7 @@
 
 import os
 import time
+import json
 import argparse
 from datetime import datetime
 
@@ -398,7 +399,7 @@ def test(model, image_root, mask_root, opt, threshold=0.5):
         augmentation = False,
         K            = opt.K
     )
-    DSC = IOU = HD = total = hd_valid = 0.0
+    dice_values, iou_values, hd_values = [], [], []
     with torch.no_grad():
         for batch in loader:
             images = batch[0].cuda()
@@ -414,20 +415,34 @@ def test(model, image_root, mask_root, opt, threshold=0.5):
                 if g_bin.sum() == 0:
                     continue
 
-                DSC   += dice_coefficient(p_bin, g_bin).item()
-                IOU   += iou_metric(p_bin, g_bin).item()
+                dice_values.append(dice_coefficient(p_bin, g_bin).item())
+                iou_values.append(iou_metric(p_bin, g_bin).item())
 
                 hd = hd95_metric(
                     p_bin.cpu().numpy().astype(np.uint8),
                     g_bin.cpu().numpy().astype(np.uint8)
                 )
-                HD       += hd
-                hd_valid += 1
-                total    += 1
+                hd_values.append(hd)
 
-    n  = max(total, 1)
-    nh = max(hd_valid, 1)
-    return DSC/n, IOU/n, HD/nh, int(total)
+    if not dice_values:
+        return 0.0, 0.0, 0.0, 0, {
+            'mean_dice': 0.0, 'median_dice': 0.0, 'std_dice': 0.0,
+            'mean_iou': 0.0, 'median_iou': 0.0,
+            'mean_hd95': 0.0, 'median_hd95': 0.0, 'n_samples': 0,
+        }
+
+    metrics = {
+        'mean_dice': float(np.mean(dice_values)),
+        'median_dice': float(np.median(dice_values)),
+        'std_dice': float(np.std(dice_values)),
+        'mean_iou': float(np.mean(iou_values)),
+        'median_iou': float(np.median(iou_values)),
+        'mean_hd95': float(np.mean(hd_values)),
+        'median_hd95': float(np.median(hd_values)),
+        'n_samples': len(dice_values),
+    }
+    return (metrics['mean_dice'], metrics['mean_iou'], metrics['mean_hd95'],
+            metrics['n_samples'], metrics)
 
 
 # =========================================================================== #
@@ -611,7 +626,7 @@ def train(train_loader, model, optimizer, epoch, opt, model_name,
                os.path.join(opt.train_save, f'{model_name}-last.pth'))
 
     model.eval()
-    d_dice, d_iou, d_hd95, n_samples = test(
+    d_dice, d_iou, d_hd95, n_samples, metrics = test(
         model, opt.val_image_root, opt.val_mask_root, opt
     )
 
@@ -632,6 +647,14 @@ def train(train_loader, model, optimizer, epoch, opt, model_name,
         best = d_dice
         torch.save(model.state_dict(),
                    os.path.join(opt.train_save, f'{model_name}-best.pth'))
+        with open(os.path.join(opt.train_save, 'best_metrics.json'), 'w') as f:
+            json.dump({
+                'best_epoch': epoch,
+                'checkpoint': os.path.abspath(
+                    os.path.join(opt.train_save, f'{model_name}-best.pth')
+                ),
+                **metrics,
+            }, f, indent=2)
         print(f'  ✓  Best  Dice={best:.4f}  IoU={d_iou:.4f}  '
               f'HD95={d_hd95:.2f}')
 
