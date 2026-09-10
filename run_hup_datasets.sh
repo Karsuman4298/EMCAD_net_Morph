@@ -12,19 +12,13 @@ TEST_BATCH_SIZE="${TEST_BATCH_SIZE:-8}"
 IMG_SIZE="${IMG_SIZE:-352}"
 PRETRAINED_DIR="${PRETRAINED_DIR:-$ROOT_DIR/pretrained_pth/pvt}"
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/model_pth_hup}"
+DATA_ROOT="${DATA_ROOT:-$ROOT_DIR/data}"
+DATASET_LIST="${DATASET_LIST:-kvasir lung isic_2018 etis_polyp covid19 colondb_polyp clinicdb_polyp}"
 
 export CUDA_VISIBLE_DEVICES="$GPU_ID"
 export PYTHONUNBUFFERED=1
 
-DATASETS=(
-  kvasir
-  lung
-  isic_2018
-  etis_polyp
-  covid19
-  colondb_polyp
-  clinicdb_polyp
-)
+read -r -a DATASETS <<< "$DATASET_LIST"
 
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   echo "ERROR: Python executable not found: $PYTHON_BIN" >&2
@@ -37,8 +31,14 @@ if [[ ! -d "$PRETRAINED_DIR" ]]; then
   exit 1
 fi
 
+if [[ ! -d "$DATA_ROOT" ]]; then
+  echo "ERROR: dataset root not found: $DATA_ROOT" >&2
+  echo "Set DATA_ROOT=/path/to/data before running this script." >&2
+  exit 1
+fi
+
 for dataset in "${DATASETS[@]}"; do
-  dataset_dir="$ROOT_DIR/data/$dataset"
+  dataset_dir="$DATA_ROOT/$dataset"
   for split in train val; do
     [[ -d "$dataset_dir/$split/images" ]] || {
       echo "ERROR: missing $dataset_dir/$split/images" >&2
@@ -54,7 +54,7 @@ done
 mkdir -p "$OUTPUT_DIR"
 
 for dataset in "${DATASETS[@]}"; do
-  dataset_dir="$ROOT_DIR/data/$dataset"
+  dataset_dir="$DATA_ROOT/$dataset"
   run_dir="$OUTPUT_DIR/$dataset"
   mkdir -p "$run_dir"
 
