@@ -653,6 +653,8 @@ def train(train_loader, model, optimizer, epoch, opt, model_name,
 # Entry point
 # =========================================================================== #
 
+# ── replace only the if __name__ == '__main__': block ────────────────────────
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--epoch',            type=int,   default=200)
@@ -669,10 +671,16 @@ if __name__ == '__main__':
     parser.add_argument('--val_image_root',   type=str,   required=True)
     parser.add_argument('--val_mask_root',    type=str,   required=True)
     parser.add_argument('--pretrained_dir',   type=str,
-                        default='./pretrained_pth/pvt/',
-                        help='Directory containing pvt_v2_b2.pth')
+                        default='./pretrained_pth/pvt/')
+    # ── NEW FLAGS ────────────────────────────────────────────────────────────
+    parser.add_argument('--use_morph',      type=lambda x: x.lower() == 'true',
+                        default=True,
+                        help='Enable MorphWrapper in decoder (default: True)')
+    parser.add_argument('--morph_sample_k', type=int, default=4,
+                        help='Number of MorphWrapper sampling heads (default: 4)')
     opt = parser.parse_args()
 
+    # ── Path checks (unchanged) ───────────────────────────────────────────────
     for label, path in [
         ('train_image_root', opt.train_image_root),
         ('train_mask_root',  opt.train_mask_root),
@@ -690,38 +698,47 @@ if __name__ == '__main__':
     proto_fg         = torch.tensor(0.8, device=device)
     proto_bg         = torch.tensor(0.2, device=device)
 
-    # NOTE: EMCADNet(...) is only given pretrained_dir=opt.pretrained_dir if
-    # the installed lib/networks_hup.py actually accepts that keyword.
-    # If your networks_hup.py has a hardcoded internal checkpoint path
-    # instead of a constructor argument, this try/except falls back to the
-    # old call so training doesn't crash — but in that case you still need
-    # to either (a) place pvt_v2_b2.pth at whatever path networks_hup.py
-    # hardcodes, or (b) edit networks_hup.py to accept pretrained_dir.
+    print(f'\n  use_morph      = {opt.use_morph}')
+    print(f'  morph_sample_k = {opt.morph_sample_k}')
+
+    # ── Model instantiation (FIX: use_morph + morph_sample_k now passed) ─────
     try:
         model = EMCADNet(
-            num_classes=1, kernel_sizes=[1,3,5],
-            expansion_factor=2, dw_parallel=True, add=True,
-            lgag_ks=3, activation='relu6',
-            encoder='pvt_v2_b2', pretrain=True,
-            pretrained_dir=opt.pretrained_dir
+            num_classes      = 1,
+            kernel_sizes     = [1, 3, 5],
+            expansion_factor = 2,
+            dw_parallel      = True,
+            add              = True,
+            lgag_ks          = 3,
+            activation       = 'relu6',
+            encoder          = 'pvt_v2_b2',
+            pretrain         = True,
+            pretrained_dir   = opt.pretrained_dir,
+            use_morph        = opt.use_morph,        # ← NEW
+            morph_sample_k   = opt.morph_sample_k,   # ← NEW
         ).to(device)
-    except TypeError:
-        print('  [warning] lib/networks_hup.py EMCADNet does not accept '
-              '"pretrained_dir" — falling back to its hardcoded internal '
-              'path. --pretrained_dir is being ignored.')
+    except TypeError as e:
+        print(f'  [warning] EMCADNet init error: {e}')
+        print('  Falling back to no-kwarg call.')
         model = EMCADNet(
-            num_classes=1, kernel_sizes=[1,3,5],
-            expansion_factor=2, dw_parallel=True, add=True,
-            lgag_ks=3, activation='relu6',
-            encoder='pvt_v2_b2', pretrain=True
+            num_classes      = 1,
+            kernel_sizes     = [1, 3, 5],
+            expansion_factor = 2,
+            dw_parallel      = True,
+            add              = True,
+            lgag_ks          = 3,
+            activation       = 'relu6',
+            encoder          = 'pvt_v2_b2',
+            pretrain         = True,
         ).to(device)
 
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=opt.lr, weight_decay=1e-4
     )
     scheduler = CosineAnnealingLR(
-        optimizer, T_max=max(1, opt.epoch - WARMUP_EPOCHS),
-        eta_min=1e-6
+        optimizer,
+        T_max  = max(1, opt.epoch - WARMUP_EPOCHS),
+        eta_min= 1e-6
     )
 
     train_loader = get_loader(
@@ -738,16 +755,13 @@ if __name__ == '__main__':
 
     p2_ep = int(opt.epoch * PHASE2_START)
     p3_ep = int(opt.epoch * PHASE3_START)
-    print(f'\nHUPAnno  |  {opt.epoch} epochs  |  K={opt.K}')
-    print(f'  Phase 1  ep 1–{p2_ep}       : L = L_c')
-    print(f'  Phase 2  ep {p2_ep+1}–{p3_ep}  : '
+    print(f'\nHUPAnno  |  {opt.epoch} epochs  |  K={opt.K}  |  '
+          f'MorphWrapper={opt.use_morph}  sample_k={opt.morph_sample_k}')
+    print(f'  Phase 1  ep 1–{p2_ep}      : L = L_c')
+    print(f'  Phase 2  ep {p2_ep+1}–{p3_ep} : '
           f'L = L_c + PCL(easy) + Lce(ring) + Lconf')
-    print(f'  Phase 3  ep {p3_ep+1}–{opt.epoch}  : '
+    print(f'  Phase 3  ep {p3_ep+1}–{opt.epoch} : '
           f'L = L_c + PCL(LRP+easy) + Lce(ring) + Lpatch + Lconf')
-    print(f'  ρ_LRP={RHO_LRP}  ρ_easy={RHO_EASY}')
-    print(f'  μ_hard={MU_HARD} (LRP stricter)  μ_easy={MU_EASY} (tolerant)')
-    print(f'  Train: {opt.train_image_root}')
-    print(f'  Val  : {opt.val_image_root}\n')
 
     for epoch in range(1, opt.epoch + 1):
         if epoch <= WARMUP_EPOCHS:
