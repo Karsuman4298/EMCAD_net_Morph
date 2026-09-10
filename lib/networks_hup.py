@@ -8,6 +8,8 @@
 # lib/networks_hup.py
 # lib/networks_hup.py
 
+import os
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -73,7 +75,7 @@ class EMCADNet(nn.Module):
         self.backbone = build_fn()
 
         if pretrain and pth_name is not None:
-            ckpt_path  = pretrained_dir + pth_name
+            ckpt_path  = os.path.join(pretrained_dir, pth_name)
             save_model = torch.load(ckpt_path, map_location='cpu')
             model_dict = self.backbone.state_dict()
             state_dict = {k: v for k, v in save_model.items()
