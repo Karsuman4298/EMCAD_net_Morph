@@ -19,3 +19,11 @@ Thumbs.db
 # Logs & model weights (large files — add manually if needed)
 logs/
 model_pth/
+
+# Local datasets and generated evaluation artifacts
+data/
+Medical-2D-Dataset/
+eval_outputs/
+figures/
+pipeline_alignment_check.png
+model_pth_hup/
