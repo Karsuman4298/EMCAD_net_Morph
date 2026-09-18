@@ -211,7 +211,7 @@ def main():
     img, mask = load_data(opt.image_path, opt.mask_path)
     
     # Initialize Model
-    model = EMCADNet(use_morph=True, morph_sample_k=4)
+    model = EMCADNet(use_morph=True, morph_sample_k=4, pretrain=False)
     if opt.model_path and os.path.exists(opt.model_path):
         model.load_state_dict(torch.load(opt.model_path, map_location='cpu'), strict=False)
         print(f"Loaded model from {opt.model_path}")
