@@ -4,6 +4,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import cv2
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.colors import LinearSegmentedColormap
@@ -133,9 +135,9 @@ def generate_morphwrapper_quiver(model, img_tensor, save_dir):
             activation[name] = output.detach()
         return hook
         
-    # Register hook to the MorphWrapper's estimator
+    # Register hook to the MorphWrapper's estimator (mfe)
     try:
-        hook_handle = model.decoder.morph1.estimator.register_forward_hook(get_activation('morph1'))
+        hook_handle = model.decoder.morph1.mfe.register_forward_hook(get_activation('morph1'))
     except Exception as e:
         print("Could not attach hook to morph1. Model architecture might differ.")
         return
