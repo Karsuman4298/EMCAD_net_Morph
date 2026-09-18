@@ -88,7 +88,7 @@ def generate_tsne_visualization(model, img, y_c, save_dir):
     X_b_2d = tsne_b.fit_transform(X_b)
     
     # PLOTTING
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(15, 6.5))
     
     # Custom color palette matching the uploaded paper
     color_lesion = '#66c2a5'     # Teal/Green
@@ -100,24 +100,34 @@ def generate_tsne_visualization(model, img, y_c, save_dir):
         x=X_a_2d[:, 0], y=X_a_2d[:, 1],
         hue=y_a,
         palette={3: color_lesion, 0: color_bg},
-        edgecolor="white", s=50, ax=axes[0], alpha=0.9
+        edgecolor="white", s=60, ax=axes[0], alpha=0.85, linewidth=0.5
     )
-    axes[0].set_title("(a) Feature Embeddings (Lesion vs Background)")
+    axes[0].set_title("(a) Feature Embeddings (Lesion vs Background)", pad=15)
     handles, labels = axes[0].get_legend_handles_labels()
-    axes[0].legend(handles, ['Background', 'Lesion'], loc='upper left')
+    # Move legend outside the plot to prevent overlapping with dots
+    axes[0].legend(handles, ['Background', 'Lesion'], 
+                   loc='lower center', bbox_to_anchor=(0.5, -0.2), 
+                   ncol=2, frameon=True, shadow=True)
+    axes[0].grid(True, linestyle='--', alpha=0.3)
     
     # Plot B
     sns.scatterplot(
         x=X_b_2d[:, 0], y=X_b_2d[:, 1],
         hue=y_b,
         palette={3: color_lesion, 2: color_mid, 0: color_bg},
-        edgecolor="white", s=50, ax=axes[1], alpha=0.9
+        edgecolor="white", s=60, ax=axes[1], alpha=0.85, linewidth=0.5
     )
-    axes[1].set_title("(b) Feature Embeddings (including Boundary)")
+    axes[1].set_title("(b) Feature Embeddings (including Boundary)", pad=15)
     handles, labels = axes[1].get_legend_handles_labels()
-    axes[1].legend(handles, ['Background', 'Boundary (Middle)', 'Lesion'], loc='upper left')
+    # Move legend outside the plot
+    axes[1].legend(handles, ['Background', 'Boundary (Middle)', 'Lesion'], 
+                   loc='lower center', bbox_to_anchor=(0.5, -0.2), 
+                   ncol=3, frameon=True, shadow=True)
+    axes[1].grid(True, linestyle='--', alpha=0.3)
     
     plt.tight_layout()
+    # Adjust subplots to make room for the bottom legend
+    plt.subplots_adjust(bottom=0.2)
     save_path = os.path.join(save_dir, 'tsne_visualizations.pdf')
     plt.savefig(save_path, format='pdf', dpi=300, bbox_inches='tight')
     plt.close()
