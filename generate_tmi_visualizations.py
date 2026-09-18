@@ -12,6 +12,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from scipy.signal import savgol_filter
 
 from lib.networks_hup import EMCADNet
+from utils.dataloader_hup import _load_image_any, _load_mask_any
 
 # IEEE TMI Professional Style Settings
 def setup_matplotlib_style():
@@ -41,9 +42,15 @@ def create_dummy_data():
 
 def load_data(image_path, mask_path):
     if image_path and os.path.exists(image_path) and mask_path and os.path.exists(mask_path):
-        img = cv2.imread(image_path)
+        img_pil = _load_image_any(image_path)
+        img = np.array(img_pil)
         img = cv2.resize(img, (352, 352))
-        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        # RGB to BGR for internal cv2 usage consistency if needed, but img_pil is RGB
+        # Our plotting uses cv2.cvtColor(img, cv2.COLOR_BGR2RGB), so we should provide BGR
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        
+        mask_pil = _load_mask_any(mask_path)
+        mask = np.array(mask_pil)
         mask = cv2.resize(mask, (352, 352))
         _, mask = cv2.threshold(mask, 127, 255, cv2.THRESH_BINARY)
     else:
