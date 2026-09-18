@@ -58,7 +58,7 @@ def load_data(image_path, mask_path):
         img, mask = create_dummy_data()
     return img, mask
 
-def generate_qualitative_comparison(img, mask, pred_mask, save_dir):
+def generate_qualitative_comparison(img, mask, pred_mask, save_dir, prefix=""):
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     
     axes[0].imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
@@ -73,11 +73,11 @@ def generate_qualitative_comparison(img, mask, pred_mask, save_dir):
     axes[2].set_title("HUPAnno Prediction")
     axes[2].axis('off')
     
-    plt.savefig(os.path.join(save_dir, 'qualitative_comparison.pdf'), format='pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, f'{prefix}qualitative_comparison.pdf'), format='pdf', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Saved qualitative_comparison.pdf")
+    print(f"Saved {prefix}qualitative_comparison.pdf")
 
-def generate_lrp_visualization(img, mask, save_dir):
+def generate_lrp_visualization(img, mask, save_dir, prefix=""):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return
@@ -131,11 +131,11 @@ def generate_lrp_visualization(img, mask, save_dir):
     axes[1].set_title("Selected Local Refinement Patches")
     axes[1].axis('off')
     
-    plt.savefig(os.path.join(save_dir, 'lrp_selection.pdf'), format='pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, f'{prefix}lrp_selection.pdf'), format='pdf', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Saved lrp_selection.pdf")
+    print(f"Saved {prefix}lrp_selection.pdf")
 
-def generate_morphwrapper_quiver(model, img_tensor, save_dir):
+def generate_morphwrapper_quiver(model, img_tensor, save_dir, prefix=""):
     activation = {}
     def get_activation(name):
         def hook(model, input, output):
@@ -176,11 +176,11 @@ def generate_morphwrapper_quiver(model, img_tensor, save_dir):
     ax.set_title("MorphWrapper Spatial Offset Vector Field")
     ax.axis('off')
     
-    plt.savefig(os.path.join(save_dir, 'morphwrapper_quiver.pdf'), format='pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, f'{prefix}morphwrapper_quiver.pdf'), format='pdf', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Saved morphwrapper_quiver.pdf")
+    print(f"Saved {prefix}morphwrapper_quiver.pdf")
 
-def generate_difficulty_entropy(model, img_tensor, save_dir):
+def generate_difficulty_entropy(model, img_tensor, save_dir, prefix=""):
     with torch.no_grad():
         preds, cls_logits, embeddings, conf_map = model(img_tensor, mode='train')
     
@@ -202,24 +202,42 @@ def generate_difficulty_entropy(model, img_tensor, save_dir):
     axes[1].axis('off')
     plt.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
     
-    plt.savefig(os.path.join(save_dir, 'difficulty_and_entropy.pdf'), format='pdf', dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, f'{prefix}difficulty_and_entropy.pdf'), format='pdf', dpi=300, bbox_inches='tight')
     plt.close()
-    print("Saved difficulty_and_entropy.pdf")
+    print(f"Saved {prefix}difficulty_and_entropy.pdf")
+
+def process_single_image(model, image_path, mask_path, save_dir):
+    img, mask = load_data(image_path, mask_path)
+    if image_path:
+        prefix = os.path.splitext(os.path.basename(image_path))[0] + "_"
+    else:
+        prefix = "dummy_"
+        
+    img_tensor = torch.from_numpy(img.transpose((2, 0, 1))).float().unsqueeze(0) / 255.0
+    
+    with torch.no_grad():
+        preds = model(img_tensor, mode='test')
+        pred_mask = preds[-1].sigmoid().squeeze().cpu().numpy()
+        pred_mask_binary = (pred_mask >= 0.5).astype(np.uint8) * 255
+    
+    generate_qualitative_comparison(img, mask, pred_mask_binary, save_dir, prefix)
+    generate_lrp_visualization(img, mask, save_dir, prefix)
+    generate_morphwrapper_quiver(model, img_tensor, save_dir, prefix)
+    generate_difficulty_entropy(model, img_tensor, save_dir, prefix)
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_path', type=str, default='', help='Path to trained .pth model')
-    parser.add_argument('--image_path', type=str, default='', help='Path to a sample test image')
-    parser.add_argument('--mask_path', type=str, default='', help='Path to the sample ground truth mask')
+    parser.add_argument('--image_path', type=str, default='', help='Path to a sample test image OR directory of images')
+    parser.add_argument('--mask_path', type=str, default='', help='Path to the sample ground truth mask OR directory of masks')
     parser.add_argument('--save_dir', type=str, default='./tmi_visualizations', help='Directory to save PDFs')
+    parser.add_argument('--num_examples', type=int, default=1, help='Number of examples to process if paths are directories')
     opt = parser.parse_args()
     
     os.makedirs(opt.save_dir, exist_ok=True)
     setup_matplotlib_style()
     
-    img, mask = load_data(opt.image_path, opt.mask_path)
-    
-    # Initialize Model
+    # Initialize Model once
     model = EMCADNet(use_morph=True, morph_sample_k=4, pretrain=False)
     if opt.model_path and os.path.exists(opt.model_path):
         model.load_state_dict(torch.load(opt.model_path, map_location='cpu'), strict=False)
@@ -228,20 +246,23 @@ def main():
         print("Model path not provided or not found. Using initialized weights for visualization.")
     
     model.eval()
-    
-    img_tensor = torch.from_numpy(img.transpose((2, 0, 1))).float().unsqueeze(0) / 255.0
-    
-    # Generate Output Mask
-    with torch.no_grad():
-        preds = model(img_tensor, mode='test')
-        pred_mask = preds[-1].sigmoid().squeeze().cpu().numpy()
-        pred_mask_binary = (pred_mask >= 0.5).astype(np.uint8) * 255
-    
-    # Generate Visualizations
-    generate_qualitative_comparison(img, mask, pred_mask_binary, opt.save_dir)
-    generate_lrp_visualization(img, mask, opt.save_dir)
-    generate_morphwrapper_quiver(model, img_tensor, opt.save_dir)
-    generate_difficulty_entropy(model, img_tensor, opt.save_dir)
+
+    if opt.image_path and os.path.isdir(opt.image_path) and opt.mask_path and os.path.isdir(opt.mask_path):
+        # Process multiple files from directory
+        from utils.dataloader_hup import _pair_images_masks
+        try:
+            pairs = _pair_images_masks(opt.image_path, opt.mask_path)
+            # Shuffle or take first N
+            pairs = pairs[:opt.num_examples]
+            for img_p, msk_p in pairs:
+                print(f"\nProcessing {os.path.basename(img_p)}...")
+                process_single_image(model, img_p, msk_p, opt.save_dir)
+        except Exception as e:
+            print(f"Error pairing images: {e}")
+    else:
+        # Process single file
+        print(f"\nProcessing single example...")
+        process_single_image(model, opt.image_path, opt.mask_path, opt.save_dir)
     
     print(f"\nAll visualizations generated successfully in '{opt.save_dir}'")
 
